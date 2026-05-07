@@ -1,0 +1,622 @@
+{
+  "name": "Healthcare WhatsApp AI Assistant - Free Stack",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "healthcare-whatsapp-free",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-trigger",
+      "name": "📱 WhatsApp Cloud API Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 400],
+      "webhookId": "healthcare-free-webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.object }}",
+              "value2": "whatsapp_business_account"
+            }
+          ]
+        }
+      },
+      "id": "node-verify-payload",
+      "name": "✅ Verify WhatsApp Payload",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [420, 400]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query['hub.challenge'] }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-webhook-verify",
+      "name": "🔐 Webhook Verification",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [640, 260]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\nlet messageData = {\n  from: '',\n  messageBody: '',\n  messageId: '',\n  phoneNumberId: '',\n  timestamp: '',\n  messageType: 'text'\n};\ntry {\n  const entry = body.entry?.[0];\n  const changes = entry?.changes?.[0];\n  const value = changes?.value;\n  const message = value?.messages?.[0];\n  messageData.from = message?.from || '';\n  messageData.messageBody = message?.text?.body || message?.interactive?.button_reply?.title || message?.interactive?.list_reply?.title || '';\n  messageData.messageId = message?.id || '';\n  messageData.phoneNumberId = value?.metadata?.phone_number_id || process.env.WHATSAPP_PHONE_NUMBER_ID || '';\n  messageData.timestamp = message?.timestamp || String(Date.now());\n  messageData.messageType = message?.type || 'text';\n} catch(e) {\n  messageData.extractError = e.message;\n}\nreturn [{ json: messageData }];"
+      },
+      "id": "node-extract-message",
+      "name": "📊 Extract Message Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 520]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.from }}",
+              "value2": ""
+            }
+          ]
+        }
+      },
+      "id": "node-validate-message",
+      "name": "🔍 Validate Message Has Sender",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [860, 520]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "mode": "url",
+          "value": "={{ $env.GOOGLE_SHEET_DOCTORS_URL }}"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Doctors"
+        },
+        "filtersUI": {}
+      },
+      "id": "node-get-doctors",
+      "name": "📋 Get Doctors from Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [1080, 400],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-creds",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const sessions = $getWorkflowStaticData('global');\nconst messageData = $('📊 Extract Message Data').first().json;\nconst from = messageData.from;\nconst doctorRows = $input.all().map(i => i.json);\n\nif (!sessions.sessions) sessions.sessions = {};\n\nif (!sessions.sessions[from]) {\n  sessions.sessions[from] = {\n    step: 'greeting',\n    patientName: '',\n    symptoms: '',\n    preferredDate: '',\n    preferredTime: '',\n    selectedDoctor: null,\n    appointmentConfirmed: false,\n    lastUpdated: new Date().toISOString()\n  };\n}\n\nconst session = sessions.sessions[from];\nconst doctors = doctorRows.filter(d => d.doctor_name && d.doctor_name.trim() !== '');\n\nsessions.sessions[from].lastUpdated = new Date().toISOString();\n\nreturn [{ json: {\n  ...messageData,\n  session,\n  doctors,\n  allDoctors: doctors\n}}];"
+      },
+      "id": "node-session-manager",
+      "name": "🗄️ Session Manager & Load Doctors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENROUTER_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "HTTP-Referer",
+              "value": "https://healthfirst.clinic"
+            },
+            {
+              "name": "X-Title",
+              "value": "HealthFirst AI Assistant"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"{{ $env.AI_MODEL || 'google/gemma-3-27b-it:free' }}\",\n  \"max_tokens\": 600,\n  \"temperature\": 0.6,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a friendly and professional healthcare assistant for HealthFirst Clinic. Help patients book appointments efficiently.\\n\\nCURRENT SESSION:\\n- Step: {{ $json.session.step }}\\n- Patient Name: {{ $json.session.patientName || 'Not collected' }}\\n- Symptoms: {{ $json.session.symptoms || 'Not collected' }}\\n- Preferred Date: {{ $json.session.preferredDate || 'Not collected' }}\\n- Preferred Time: {{ $json.session.preferredTime || 'Not collected' }}\\n- Selected Doctor: {{ $json.session.selectedDoctor ? $json.session.selectedDoctor.doctor_name : 'Not selected' }}\\n\\nAVAILABLE DOCTORS:\\n{{ $json.doctors.map(d => d.doctor_name + ' | ' + d.specialty + ' | Days: ' + d.available_days + ' | Timings: ' + d.timings + ' | Clinic: ' + d.clinic_address).join('\\\\n') }}\\n\\nSTEPS TO FOLLOW:\\n1. Step 'greeting' - Warmly greet the patient. Introduce HealthFirst Clinic. Ask for their full name. End with: NEXT_STEP:get_name\\n2. Step 'get_name' - Collect and confirm the patient name from message. Ask what symptoms or health issue brings them in today. End with: NEXT_STEP:get_symptoms and PATIENT_NAME:[name]\\n3. Step 'get_symptoms' - Acknowledge symptoms. From available doctors list, recommend 1-2 most relevant doctors based on specialty match. Show doctor name, specialty, days, and timings. Ask them to type the doctor name to select. End with: NEXT_STEP:select_doctor\\n4. Step 'select_doctor' - Confirm selected doctor. Ask for preferred appointment date (e.g. 2025-07-15) and time. End with: NEXT_STEP:get_datetime and SELECTED_DOCTOR:[exact doctor_name from list]\\n5. Step 'get_datetime' - Collect preferred date and time. Show summary of: patient name, doctor, date, time. Ask them to reply YES to confirm or NO to change. End with: NEXT_STEP:confirm_booking and PREFERRED_DATE:[date] and PREFERRED_TIME:[time]\\n6. Step 'confirm_booking' - Patient replied YES. Tell them booking is being processed. End with: NEXT_STEP:booking_complete\\n7. Step 'booking_complete' - Booking is saved. Give warm closing message. Tell them confirmation will arrive shortly. End with: NEXT_STEP:done\\n\\nRULES:\\n- Be concise and friendly. Max 200 words per response.\\n- Always include metadata tags on separate lines at the end.\\n- Never skip a step.\\n- Use emojis appropriately.\\n- If patient says anything unclear, gently redirect.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"{{ $json.messageBody }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "node-ai-chatbot",
+      "name": "🤖 AI Chatbot - OpenRouter Free Model",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1520, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const aiRaw = $input.first().json;\nconst prevData = $('🗄️ Session Manager & Load Doctors').first().json;\nconst sessions = $getWorkflowStaticData('global');\nconst from = prevData.from;\n\nlet responseText = '';\ntry {\n  responseText = aiRaw.choices?.[0]?.message?.content || aiRaw.message?.content || 'I am sorry, I could not process your request. Please try again.';\n} catch(e) {\n  responseText = 'Sorry, something went wrong. Please try again or call us directly.';\n}\n\nlet session = sessions.sessions[from];\nlet displayText = responseText;\n\nconst nextStepMatch = responseText.match(/NEXT_STEP:(\\w+)/);\nconst patientNameMatch = responseText.match(/PATIENT_NAME:([^\\n]+)/);\nconst selectedDoctorMatch = responseText.match(/SELECTED_DOCTOR:([^\\n]+)/);\nconst preferredDateMatch = responseText.match(/PREFERRED_DATE:([^\\n]+)/);\nconst preferredTimeMatch = responseText.match(/PREFERRED_TIME:([^\\n]+)/);\n\nif (nextStepMatch) {\n  session.step = nextStepMatch[1].trim();\n  displayText = displayText.replace(/NEXT_STEP:\\w+/, '').trim();\n}\nif (patientNameMatch) {\n  session.patientName = patientNameMatch[1].trim();\n  displayText = displayText.replace(/PATIENT_NAME:[^\\n]+/, '').trim();\n}\nif (selectedDoctorMatch) {\n  const docName = selectedDoctorMatch[1].trim();\n  const matchedDoc = prevData.allDoctors.find(d => d.doctor_name && d.doctor_name.toLowerCase().includes(docName.toLowerCase()));\n  if (matchedDoc) session.selectedDoctor = matchedDoc;\n  displayText = displayText.replace(/SELECTED_DOCTOR:[^\\n]+/, '').trim();\n}\nif (preferredDateMatch) {\n  session.preferredDate = preferredDateMatch[1].trim();\n  displayText = displayText.replace(/PREFERRED_DATE:[^\\n]+/, '').trim();\n}\nif (preferredTimeMatch) {\n  session.preferredTime = preferredTimeMatch[1].trim();\n  displayText = displayText.replace(/PREFERRED_TIME:[^\\n]+/, '').trim();\n}\n\nif (session.step === 'booking_complete' || session.step === 'done') {\n  session.appointmentConfirmed = true;\n}\n\ndisplayText = displayText.replace(/\\n{3,}/g, '\\n\\n').trim();\n\nif (prevData.messageBody) {\n  session.symptoms = prevData.messageBody;\n}\n\nsessions.sessions[from] = session;\n\nconst isBookingReady = (session.step === 'booking_complete' || session.step === 'done') && session.appointmentConfirmed && session.selectedDoctor;\n\nreturn [{ json: {\n  ...prevData,\n  aiResponse: displayText,\n  session,\n  isBookingReady,\n  appointmentPayload: isBookingReady ? {\n    patient_name: session.patientName,\n    phone: from,\n    symptoms: session.symptoms,\n    doctor_name: session.selectedDoctor?.doctor_name || '',\n    doctor_email: session.selectedDoctor?.email || '',\n    doctor_specialty: session.selectedDoctor?.specialty || '',\n    doctor_timings: session.selectedDoctor?.timings || '',\n    clinic_address: session.selectedDoctor?.clinic_address || '',\n    appointment_date: session.preferredDate,\n    appointment_time: session.preferredTime,\n    booking_status: 'Confirmed',\n    booked_at: new Date().toISOString()\n  } : null\n}}];"
+      },
+      "id": "node-process-response",
+      "name": "⚙️ Parse AI Response & Update Session",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1740, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.isBookingReady }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-check-booking",
+      "name": "🔀 Is Appointment Ready to Save?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1960, 400]
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v18.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.from }}\",\n  \"type\": \"text\",\n  \"text\": { \"body\": {{ JSON.stringify($json.aiResponse) }} }\n}",
+        "options": {}
+      },
+      "id": "node-send-chat-reply",
+      "name": "📤 Send WhatsApp Chat Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2180, 560]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "mode": "url",
+          "value": "={{ $env.GOOGLE_SHEET_APPOINTMENTS_URL }}"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Appointments"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "patient_name": "={{ $json.appointmentPayload.patient_name }}",
+            "phone": "={{ $json.appointmentPayload.phone }}",
+            "symptoms": "={{ $json.appointmentPayload.symptoms }}",
+            "doctor_name": "={{ $json.appointmentPayload.doctor_name }}",
+            "appointment_date": "={{ $json.appointmentPayload.appointment_date }}",
+            "appointment_time": "={{ $json.appointmentPayload.appointment_time }}",
+            "booking_status": "={{ $json.appointmentPayload.booking_status }}",
+            "booked_at": "={{ $json.appointmentPayload.booked_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-save-appointment",
+      "name": "💾 Save Appointment to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2180, 240],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-creds",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "mode": "url",
+          "value": "={{ $env.GOOGLE_SHEET_CRM_URL }}"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "CRM_Patients"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "patient_name": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.patient_name }}",
+            "phone": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.phone }}",
+            "last_symptoms": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.symptoms }}",
+            "last_doctor": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_name }}",
+            "last_appointment_date": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_date }}",
+            "status": "Active",
+            "source": "WhatsApp AI Bot",
+            "created_at": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.booked_at }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-crm-update",
+      "name": "🏢 Update CRM in Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2400, 160],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-creds",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_email }}",
+        "subject": "=🏥 New Appointment: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.patient_name }} - {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_date }} at {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_time }}",
+        "emailType": "text",
+        "message": "=Dear {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_name }},\n\nA new appointment has been booked via HealthFirst WhatsApp AI Assistant.\n\nPATIENT DETAILS:\n- Name: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.patient_name }}\n- Phone: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.phone }}\n- Symptoms/Reason: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.symptoms }}\n\nAPPOINTMENT DETAILS:\n- Date: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_date }}\n- Time: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_time }}\n- Clinic: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.clinic_address }}\n\nPlease ensure your availability at the scheduled time.\n\nBest regards,\nHealthFirst Medical Center\nAutomated Booking System",
+        "options": {}
+      },
+      "id": "node-doctor-email",
+      "name": "📧 Email Notification to Doctor",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2400, 320],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-creds",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v18.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('⚙️ Parse AI Response & Update Session').first().json.from }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"✅ *Appointment Confirmed!*\\n\\nDear {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.patient_name }},\\n\\nYour appointment has been booked successfully! 🎉\\n\\n📋 *Booking Summary:*\\n👨‍⚕️ Doctor: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_name }}\\n🏥 Specialty: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_specialty }}\\n📅 Date: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_date }}\\n⏰ Time: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_time }}\\n📍 Location: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.clinic_address }}\\n\\n💡 *Please remember to:*\\n• Arrive 10 minutes early\\n• Bring previous medical records if any\\n• For cancellations, call us 24 hours in advance\\n\\nThank you for choosing HealthFirst Clinic! 🌟\"\n  }\n}",
+        "options": {}
+      },
+      "id": "node-patient-confirmation",
+      "name": "✅ Send WhatsApp Confirmation to Patient",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2400, 480]
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "mode": "id",
+          "value": "={{ $env.GOOGLE_CALENDAR_ID }}"
+        },
+        "start": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_date }}T{{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_time.replace(' ', 'T') }}:00",
+        "end": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_date }}T{{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.appointment_time.replace(' ', 'T') }}:00",
+        "additionalFields": {
+          "summary": "=Appointment: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.patient_name }} with {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_name }}",
+          "description": "=Patient: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.patient_name }}\nPhone: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.phone }}\nSymptoms: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.symptoms }}\nDoctor: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_name }}\nSpecialty: {{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_specialty }}",
+          "location": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.clinic_address }}",
+          "attendees": [
+            {
+              "email": "={{ $('⚙️ Parse AI Response & Update Session').first().json.appointmentPayload.doctor_email }}"
+            }
+          ]
+        }
+      },
+      "id": "node-google-calendar",
+      "name": "📅 Create Google Calendar Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.1,
+      "position": [2620, 320],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "google-calendar-creds",
+          "name": "Google Calendar OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"ok\" }",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-final-response",
+      "name": "✔️ Final Webhook 200 Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2840, 400]
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.facebook.com/v18.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('📊 Extract Message Data').first().json.from }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"⚠️ We're sorry, but we encountered a technical issue processing your request. Please try again in a moment or call us directly at our clinic. We apologize for the inconvenience! 🏥\"\n  }\n}",
+        "options": {}
+      },
+      "id": "node-error-whatsapp",
+      "name": "🚨 Error - Fallback WhatsApp Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1960, 700]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $env.ADMIN_EMAIL }}",
+        "subject": "=🚨 HealthFirst Bot Error - {{ new Date().toISOString() }}",
+        "emailType": "text",
+        "message": "=An error occurred in the HealthFirst WhatsApp AI Assistant workflow.\n\nTimestamp: {{ new Date().toISOString() }}\nPatient Phone: {{ $('📊 Extract Message Data').first().json.from || 'Unknown' }}\nMessage: {{ $('📊 Extract Message Data').first().json.messageBody || 'Unknown' }}\n\nPlease investigate the n8n workflow immediately.\n\n- Automated Error Alert System",
+        "options": {}
+      },
+      "id": "node-error-email",
+      "name": "📨 Error - Admin Email Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [2180, 700],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-creds",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "mode": "url",
+          "value": "={{ $env.GOOGLE_SHEET_LOGS_URL }}"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Error_Logs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ new Date().toISOString() }}",
+            "patient_phone": "={{ $('📊 Extract Message Data').first().json.from || 'Unknown' }}",
+            "message": "={{ $('📊 Extract Message Data').first().json.messageBody || 'Unknown' }}",
+            "error_stage": "Workflow Processing Error",
+            "status": "Failed"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-error-log",
+      "name": "📝 Log Error to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [2400, 700],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "google-sheets-creds",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"error_handled\" }",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-error-response",
+      "name": "⚠️ Error Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2620, 700]
+    }
+  ],
+  "connections": {
+    "📱 WhatsApp Cloud API Webhook": {
+      "main": [
+        [
+          { "node": "✅ Verify WhatsApp Payload", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "✅ Verify WhatsApp Payload": {
+      "main": [
+        [
+          { "node": "🔐 Webhook Verification", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "📊 Extract Message Data", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "📊 Extract Message Data": {
+      "main": [
+        [
+          { "node": "🔍 Validate Message Has Sender", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🔍 Validate Message Has Sender": {
+      "main": [
+        [
+          { "node": "🚨 Error - Fallback WhatsApp Message", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "📋 Get Doctors from Google Sheets", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "📋 Get Doctors from Google Sheets": {
+      "main": [
+        [
+          { "node": "🗄️ Session Manager & Load Doctors", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🗄️ Session Manager & Load Doctors": {
+      "main": [
+        [
+          { "node": "🤖 AI Chatbot - OpenRouter Free Model", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🤖 AI Chatbot - OpenRouter Free Model": {
+      "main": [
+        [
+          { "node": "⚙️ Parse AI Response & Update Session", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "⚙️ Parse AI Response & Update Session": {
+      "main": [
+        [
+          { "node": "🔀 Is Appointment Ready to Save?", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🔀 Is Appointment Ready to Save?": {
+      "main": [
+        [
+          { "node": "💾 Save Appointment to Google Sheets", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "📤 Send WhatsApp Chat Reply", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "💾 Save Appointment to Google Sheets": {
+      "main": [
+        [
+          { "node": "🏢 Update CRM in Google Sheets", "type": "main", "index": 0 },
+          { "node": "📧 Email Notification to Doctor", "type": "main", "index": 0 },
+          { "node": "✅ Send WhatsApp Confirmation to Patient", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🏢 Update CRM in Google Sheets": {
+      "main": [
+        [
+          { "node": "📅 Create Google Calendar Event", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "📅 Create Google Calendar Event": {
+      "main": [
+        [
+          { "node": "✔️ Final Webhook 200 Response", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "📧 Email Notification to Doctor": {
+      "main": [
+        [
+          { "node": "✔️ Final Webhook 200 Response", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "✅ Send WhatsApp Confirmation to Patient": {
+      "main": [
+        [
+          { "node": "✔️ Final Webhook 200 Response", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "📤 Send WhatsApp Chat Reply": {
+      "main": [
+        [
+          { "node": "✔️ Final Webhook 200 Response", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🚨 Error - Fallback WhatsApp Message": {
+      "main": [
+        [
+          { "node": "📨 Error - Admin Email Alert", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "📨 Error - Admin Email Alert": {
+      "main": [
+        [
+          { "node": "📝 Log Error to Google Sheets", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "📝 Log Error to Google Sheets": {
+      "main": [
+        [
+          { "node": "⚠️ Error Webhook Response", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "timezone": "Asia/Karachi"
+  },
+  "staticData": {
+    "sessions": {}
+  },
+  "tags": [
+    { "id": "tag-healthcare", "name": "Healthcare" },
+    { "id": "tag-whatsapp", "name": "WhatsApp" },
+    { "id": "tag-free-stack", "name": "Free Stack" },
+    { "id": "tag-ai-bot", "name": "AI Chatbot" }
+  ],
+  "triggerCount": 1,
+  "id": "healthcare-whatsapp-free-workflow",
+  "meta": {
+    "instanceId": "healthcare-free-001",
+    "templateCredsSetupCompleted": false
+  },
+  "pinData": {},
+  "versionId": "2.0.0",
+  "active": false
+}
